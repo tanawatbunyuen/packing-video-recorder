@@ -1,0 +1,7 @@
+<!doctype html><html lang="th"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Packing Dashboard V1.8</title><link rel="stylesheet" href="style.css"></head><body>
+<header><div><h1>Packing Dashboard</h1><small>Version 1.8 • Daily Video Lookup</small></div><div class="badges"><span id="folderStatus">ยังไม่ได้เลือกโฟลเดอร์</span></div></header>
+<nav class="tabs"><a class="tab" href="./index.html">PACKING</a><a class="tab active" href="./dashboard.html">DASHBOARD</a></nav>
+<main class="dashboard-page"><section class="card dashwide"><div class="dashbar"><div><h2>รายการบันทึกประจำวัน</h2><p>เลือกวันที่ แล้วคลิก Barcode เพื่อเปิดวิดีโอ</p></div><div class="dashcontrols"><label>เลือกวันที่ <input type="date" id="dashDate"></label><button id="folderBtn">เลือกโฟลเดอร์วิดีโอ</button></div></div>
+<div class="stats"><div><small>จำนวนวิดีโอ</small><strong id="dashCount">0</strong></div><div><small>เวลาบันทึกรวม</small><strong id="dashDuration">00:00</strong></div></div>
+<div class="dashhead"><b>เวลา</b><b>Barcode / Order</b><b>ผู้แพ็ก</b><b>ความยาว</b></div><div id="dashRows"></div><div id="dashEmpty" class="empty">ไม่พบรายการในวันที่เลือก</div></section></main>
+<div id="toast"></div><script src="dashboard.js"></script></body></html>

@@ -53,6 +53,17 @@ async function checkOldVideos(){
   m.querySelector("#oldDelete").onclick=async()=>{m.remove();await deleteOldRecordings(rows)};
 }
 
+
+function localDay(iso){let d=new Date(iso),z=n=>String(n).padStart(2,"0");return d.getFullYear()+"-"+z(d.getMonth()+1)+"-"+z(d.getDate())}
+function todayLocal(){let d=new Date(),z=n=>String(n).padStart(2,"0");return d.getFullYear()+"-"+z(d.getMonth()+1)+"-"+z(d.getDate())}
+async function renderDashboard(){
+  let day=$("dashDate").value||todayLocal(),rows=(await all()).filter(x=>localDay(x.createdAt)===day).sort((a,b)=>a.createdAt.localeCompare(b.createdAt));
+  $("dashCount").textContent=rows.length;$("dashDuration").textContent=fmt(rows.reduce((s,x)=>s+(x.durationSeconds||0),0));$("dashRows").innerHTML="";$("dashEmpty").hidden=rows.length>0;
+  for(const x of rows){let r=document.createElement("div");r.className="dashrow";let time=document.createElement("div");time.textContent=new Date(x.createdAt).toLocaleTimeString("th-TH",{hour:"2-digit",minute:"2-digit",second:"2-digit"});let link=document.createElement("button");link.className="barcode-link";link.textContent=x.barcode;link.title="คลิกเพื่อเปิดวิดีโอ";link.onclick=()=>play(x);let worker=document.createElement("div");worker.textContent=x.worker||"-";let dur=document.createElement("div");dur.textContent=fmt(x.durationSeconds||0);r.append(time,link,worker,dur);$("dashRows").appendChild(r)}
+}
+document.querySelectorAll(".tab").forEach(b=>b.onclick=async()=>{document.querySelectorAll(".tab").forEach(x=>x.classList.toggle("active",x===b));let dash=b.dataset.tab==="dashboard";$("packingTab").hidden=dash;$("dashboardTab").hidden=!dash;if(dash)await renderDashboard()});
+$("dashDate").value=todayLocal();$("dashDate").onchange=renderDashboard;
+
 async function render(){let rows=await all(),q=$("search").value.trim().toLowerCase();rows.sort((a,b)=>b.createdAt.localeCompare(a.createdAt));if(q)rows=rows.filter(x=>x.barcode.toLowerCase().includes(q)||(x.worker||"").toLowerCase().includes(q));$("logs").innerHTML="";for(let x of rows){let r=document.createElement("div");r.className="logrow";let a=document.createElement("div");a.className="actions",p=document.createElement("button"),d=document.createElement("button");p.textContent="▶ PLAY";p.onclick=()=>play(x);d.textContent="ลบ";d.className="delete";d.onclick=()=>removeRecording(x);a.append(p,d);for(let v of [x.barcode,x.worker,new Date(x.createdAt).toLocaleString(),fmt(x.durationSeconds)]){let el=document.createElement("div");el.textContent=v;r.appendChild(el)}r.appendChild(a);$("logs").appendChild(r)}}
 $("search").oninput=render;
-(async()=>{let w=await get(PREFS,"worker");if(w?.value){$("worker").value=w.value;packer=w.value;$("currentWorker").textContent=packer;$("workerStatus").textContent="ผู้แพ็ก: "+packer}let q=await get(PREFS,"quality");$("quality").value=q?.value||"720";let h=await get(HANDLES,"root");if(h?.handle){root=h.handle;$("folderStatus").textContent="FOLDER: "+root.name}await render();setTimeout(checkOldVideos,700)})();
+(async()=>{let w=await get(PREFS,"worker");if(w?.value){$("worker").value=w.value;packer=w.value;$("currentWorker").textContent=packer;$("workerStatus").textContent="ผู้แพ็ก: "+packer}let q=await get(PREFS,"quality");$("quality").value=q?.value||"720";let h=await get(HANDLES,"root");if(h?.handle){root=h.handle;$("folderStatus").textContent="FOLDER: "+root.name}await render();await renderDashboard();setTimeout(checkOldVideos,700)})();

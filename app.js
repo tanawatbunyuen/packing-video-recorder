@@ -23,6 +23,36 @@ $("stopBtn").onclick=stop;
 $("barcode").addEventListener("keydown",async e=>{if(e.key!=="Enter")return;let code=e.target.value.trim();e.target.value="";if(!code)return;if(recorder&&recorder.state==="recording"){if(code.toLowerCase()===active.toLowerCase())await stop();else toast("กำลังอัด "+active+" ต้องยิง Barcode เดิมเพื่อหยุด");return}await start(code)});
 async function play(x){try{if(!root||!await permission())return toast("กรุณาเลือกโฟลเดอร์วิดีโอ");let dir=await root.getDirectoryHandle(x.folder),fh=await dir.getFileHandle(x.filename),f=await fh.getFile(),u=URL.createObjectURL(f);window.open(u,"_blank");setTimeout(()=>URL.revokeObjectURL(u),60000)}catch(e){toast("เปิดวิดีโอไม่ได้")}}
 async function removeRecording(x){if(recorder&&recorder.state==="recording")return toast("ไม่สามารถลบขณะกำลังอัด");if(!root||!await permission())return toast("กรุณาเลือกโฟลเดอร์วิดีโอ");let m=document.createElement("div");m.className="modal";m.innerHTML=`<div><h3>ลบวิดีโอ?</h3><p>จะลบ Order <b></b> ทั้งไฟล์วิดีโอและ Packing Log หลังจากนั้นสามารถสแกน Barcode นี้เพื่ออัดใหม่ได้</p><div class="buttons"><button id="cancel">ยกเลิก</button><button class="red" id="yes">ลบวิดีโอ</button></div></div>`;m.querySelector("b").textContent=x.barcode;document.body.appendChild(m);m.querySelector("#cancel").onclick=()=>m.remove();m.querySelector("#yes").onclick=async()=>{m.remove();try{let dir=await root.getDirectoryHandle(x.folder);try{await dir.removeEntry(x.filename)}catch(e){if(e.name!=="NotFoundError")throw e}await del(x.id);toast("ลบแล้ว สามารถสแกน "+x.barcode+" เพื่ออัดใหม่ได้");await render()}catch(e){toast("ลบไม่สำเร็จ: "+e.message)}}}
+
+const OLD_DAYS=10;
+async function oldRecordings(){
+  const rows=await all(),cutoff=Date.now()-OLD_DAYS*24*60*60*1000;
+  return rows.filter(x=>new Date(x.createdAt).getTime()<cutoff);
+}
+async function deleteOldRecordings(rows){
+  if(!root||!await permission())return toast("กรุณาเลือกโฟลเดอร์วิดีโอก่อน");
+  let removed=0,failed=0;
+  for(const x of rows){
+    try{
+      let dir=await root.getDirectoryHandle(x.folder);
+      try{await dir.removeEntry(x.filename)}catch(e){if(e.name!=="NotFoundError")throw e}
+      await del(x.id); removed++;
+    }catch(e){failed++}
+  }
+  await render();
+  toast(failed?("ลบแล้ว "+removed+" รายการ, ลบไม่สำเร็จ "+failed+" รายการ"):("ลบวิดีโอเก่าแล้ว "+removed+" รายการ"));
+}
+async function checkOldVideos(){
+  const rows=await oldRecordings(); if(!rows.length)return;
+  const oldest=Math.max(...rows.map(x=>Math.floor((Date.now()-new Date(x.createdAt).getTime())/86400000)));
+  let m=document.createElement("div");m.className="modal";
+  m.innerHTML=`<div><h3>พบวิดีโอเก่าเกิน 10 วัน</h3><p>พบ <b class="count"></b> รายการ (เก่าสุดประมาณ <b class="age"></b> วัน) ต้องการลบวิดีโอและ Packing Log เหล่านี้หรือไม่?</p><p><small>ระบบจะลบเฉพาะรายการที่มีอายุเกิน 10 วัน และจะถามยืนยันก่อนทุกครั้ง</small></p><div class="buttons"><button id="oldLater">ยังไม่ลบ</button><button class="red" id="oldDelete">ลบวิดีโอเก่า</button></div></div>`;
+  m.querySelector(".count").textContent=rows.length;m.querySelector(".age").textContent=oldest;
+  document.body.appendChild(m);
+  m.querySelector("#oldLater").onclick=()=>m.remove();
+  m.querySelector("#oldDelete").onclick=async()=>{m.remove();await deleteOldRecordings(rows)};
+}
+
 async function render(){let rows=await all(),q=$("search").value.trim().toLowerCase();rows.sort((a,b)=>b.createdAt.localeCompare(a.createdAt));if(q)rows=rows.filter(x=>x.barcode.toLowerCase().includes(q)||(x.worker||"").toLowerCase().includes(q));$("logs").innerHTML="";for(let x of rows){let r=document.createElement("div");r.className="logrow";let a=document.createElement("div");a.className="actions",p=document.createElement("button"),d=document.createElement("button");p.textContent="▶ PLAY";p.onclick=()=>play(x);d.textContent="ลบ";d.className="delete";d.onclick=()=>removeRecording(x);a.append(p,d);for(let v of [x.barcode,x.worker,new Date(x.createdAt).toLocaleString(),fmt(x.durationSeconds)]){let el=document.createElement("div");el.textContent=v;r.appendChild(el)}r.appendChild(a);$("logs").appendChild(r)}}
 $("search").oninput=render;
-(async()=>{let w=await get(PREFS,"worker");if(w?.value){$("worker").value=w.value;packer=w.value;$("currentWorker").textContent=packer;$("workerStatus").textContent="ผู้แพ็ก: "+packer}let q=await get(PREFS,"quality");$("quality").value=q?.value||"720";let h=await get(HANDLES,"root");if(h?.handle){root=h.handle;$("folderStatus").textContent="FOLDER: "+root.name}render()})();
+(async()=>{let w=await get(PREFS,"worker");if(w?.value){$("worker").value=w.value;packer=w.value;$("currentWorker").textContent=packer;$("workerStatus").textContent="ผู้แพ็ก: "+packer}let q=await get(PREFS,"quality");$("quality").value=q?.value||"720";let h=await get(HANDLES,"root");if(h?.handle){root=h.handle;$("folderStatus").textContent="FOLDER: "+root.name}await render();setTimeout(checkOldVideos,700)})();

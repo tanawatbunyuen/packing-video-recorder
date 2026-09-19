@@ -1,0 +1,15 @@
+const $=id=>document.getElementById(id),DB="pack-v14",STORE="logs",HANDLES="handles";let root;
+function toast(s){$("toast").textContent=s;$("toast").classList.add("show");setTimeout(()=>$("toast").classList.remove("show"),2500)}
+function fmt(s){s=Math.floor(s||0);return String(Math.floor(s/60)).padStart(2,"0")+":"+String(s%60).padStart(2,"0")}
+function db(){return new Promise((ok,no)=>{let r=indexedDB.open(DB,1);r.onsuccess=()=>ok(r.result);r.onerror=()=>no(r.error)})}
+async function all(){let d=await db();return new Promise((ok,no)=>{let r=d.transaction(STORE).objectStore(STORE).getAll();r.onsuccess=()=>ok(r.result||[]);r.onerror=()=>no(r.error)})}
+async function get(s,k){let d=await db();return new Promise((ok,no)=>{let r=d.transaction(s).objectStore(s).get(k);r.onsuccess=()=>ok(r.result);r.onerror=()=>no(r.error)})}
+async function put(s,v){let d=await db();return new Promise((ok,no)=>{let r=d.transaction(s,"readwrite").objectStore(s).put(v);r.onsuccess=()=>ok();r.onerror=()=>no(r.error)})}
+async function permission(){if(!root)return false;let p=await root.queryPermission({mode:"readwrite"});if(p==="granted")return true;return await root.requestPermission({mode:"readwrite"})==="granted"}
+function localDay(iso){let d=new Date(iso),z=n=>String(n).padStart(2,"0");return d.getFullYear()+"-"+z(d.getMonth()+1)+"-"+z(d.getDate())}
+function todayLocal(){let d=new Date(),z=n=>String(n).padStart(2,"0");return d.getFullYear()+"-"+z(d.getMonth()+1)+"-"+z(d.getDate())}
+async function play(x){try{if(!root||!await permission())return toast("กรุณาเลือกโฟลเดอร์วิดีโอ");let dir=await root.getDirectoryHandle(x.folder),fh=await dir.getFileHandle(x.filename),f=await fh.getFile(),u=URL.createObjectURL(f);window.open(u,"_blank");setTimeout(()=>URL.revokeObjectURL(u),60000)}catch(e){toast("เปิดวิดีโอไม่ได้: "+e.message)}}
+async function render(){let day=$("dashDate").value||todayLocal(),rows=(await all()).filter(x=>localDay(x.createdAt)===day).sort((a,b)=>a.createdAt.localeCompare(b.createdAt));$("dashCount").textContent=rows.length;$("dashDuration").textContent=fmt(rows.reduce((s,x)=>s+(x.durationSeconds||0),0));$("dashRows").innerHTML="";$("dashEmpty").hidden=rows.length>0;for(const x of rows){let r=document.createElement("div");r.className="dashrow";let t=document.createElement("div");t.textContent=new Date(x.createdAt).toLocaleTimeString("th-TH",{hour:"2-digit",minute:"2-digit",second:"2-digit"});let l=document.createElement("button");l.className="barcode-link";l.textContent=x.barcode;l.title="คลิกเพื่อเปิดวิดีโอ";l.onclick=()=>play(x);let w=document.createElement("div");w.textContent=x.worker||"-";let d=document.createElement("div");d.textContent=fmt(x.durationSeconds);r.append(t,l,w,d);$("dashRows").appendChild(r)}}
+$("folderBtn").onclick=async()=>{try{root=await showDirectoryPicker({mode:"readwrite"});await put(HANDLES,{key:"root",handle:root});$("folderStatus").textContent="FOLDER: "+root.name}catch(e){}};
+$("dashDate").value=todayLocal();$("dashDate").onchange=render;
+(async()=>{let h=await get(HANDLES,"root");if(h?.handle){root=h.handle;$("folderStatus").textContent="FOLDER: "+root.name}await render()})();

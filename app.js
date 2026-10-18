@@ -8,9 +8,24 @@ async function put(s,v,add=false){let d=await db();return new Promise((ok,no)=>{
 async function get(s,k){let d=await db();return new Promise((ok,no)=>{let r=d.transaction(s).objectStore(s).get(k);r.onsuccess=()=>ok(r.result);r.onerror=()=>no(r.error)})}
 async function all(){let d=await db();return new Promise((ok,no)=>{let r=d.transaction(STORE).objectStore(STORE).getAll();r.onsuccess=()=>ok(r.result||[]);r.onerror=()=>no(r.error)})}
 async function del(id){let d=await db();return new Promise((ok,no)=>{let t=d.transaction(STORE,"readwrite");t.objectStore(STORE).delete(id);t.oncomplete=ok;t.onerror=()=>no(t.error)})}
-async function permission(){if(!root)return false;let p=await root.queryPermission({mode:"readwrite"});if(p==="granted")return true;return await root.requestPermission({mode:"readwrite"})==="granted"}
+async function permission(){if(!root)return false;try{let p=await root.queryPermission({mode:"readwrite"});if(p==="granted")return true;return await root.requestPermission({mode:"readwrite"})==="granted"}catch(e){console.error("Folder permission failed:",e);toast("ไม่สามารถเข้าถึงโฟลเดอร์: "+(e.message||e.name));return false}}
 $("workerBtn").onclick=async()=>{let n=$("worker").value.trim();if(!n)return toast("กรุณาพิมพ์ชื่อพนักงาน");packer=n;$("currentWorker").textContent=n;$("workerStatus").textContent="ผู้แพ็ก: "+n;await put(PREFS,{key:"worker",value:n});$("barcode").focus()}
-$("folderBtn").onclick=async()=>{try{root=await showDirectoryPicker({mode:"readwrite"});await put(HANDLES,{key:"root",handle:root});$("folderStatus").textContent="FOLDER: "+root.name;$("barcode").focus()}catch(e){}}
+$("folderBtn").onclick=async()=>{
+  try{
+    if(typeof window.showDirectoryPicker!=="function"){toast("เบราว์เซอร์ไม่รองรับการเลือกโฟลเดอร์ กรุณาใช้ Chrome/Edge ผ่าน HTTPS");return}
+    const selected=await window.showDirectoryPicker({mode:"readwrite"});
+    root=selected;
+    $("folderStatus").textContent="FOLDER: "+selected.name;
+    toast("เลือกโฟลเดอร์ "+selected.name+" สำเร็จ");
+    try{await put(HANDLES,{key:"root",handle:selected})}
+    catch(e){console.error("Folder preference save failed:",e);toast("เลือกโฟลเดอร์สำเร็จ แต่จำค่าไม่ได้: "+(e.message||e.name))}
+    $("barcode").focus();
+  }catch(e){
+    if(e.name==="AbortError")return;
+    console.error("Folder selection failed:",e);
+    toast("เลือกโฟลเดอร์ไม่สำเร็จ: "+(e.message||e.name||e));
+  }
+}
 const QUALITY={480:{w:854,h:480,b:800000},720:{w:1280,h:720,b:1500000},1080:{w:1920,h:1080,b:3000000}};
 function selectedQuality(){return QUALITY[$("quality").value]||QUALITY[720]}
 async function openCamera(){try{let q=selectedQuality();stream=await navigator.mediaDevices.getUserMedia({video:{width:{ideal:q.w},height:{ideal:q.h},frameRate:{ideal:30}},audio:false});$("preview").srcObject=stream;$("cameraStatus").textContent="CAMERA ON • "+$("quality").value+"p";$("cameraBtn").textContent="ปิดกล้อง";$("quality").disabled=false;$("barcode").focus();return true}catch(e){stream=null;toast("เปิดกล้องไม่ได้: "+e.message);return false}}

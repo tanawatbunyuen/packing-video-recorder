@@ -1,7 +1,7 @@
 const $=id=>document.getElementById(id),DB="pack-v14",STORE="logs",HANDLES="handles";let root;
 function toast(s){$("toast").textContent=s;$("toast").classList.add("show");setTimeout(()=>$("toast").classList.remove("show"),2500)}
 function fmt(s){s=Math.floor(s||0);return String(Math.floor(s/60)).padStart(2,"0")+":"+String(s%60).padStart(2,"0")}
-function db(){return new Promise((ok,no)=>{let r=indexedDB.open(DB,1);r.onsuccess=()=>ok(r.result);r.onerror=()=>no(r.error)})}
+function db(){return new Promise((ok,no)=>{const r=indexedDB.open(DB,2);r.onupgradeneeded=()=>{const d=r.result;if(!d.objectStoreNames.contains("logs"))d.createObjectStore("logs",{keyPath:"id",autoIncrement:true});if(!d.objectStoreNames.contains("handles"))d.createObjectStore("handles",{keyPath:"key"});if(!d.objectStoreNames.contains("prefs"))d.createObjectStore("prefs",{keyPath:"key"})};r.onsuccess=()=>ok(r.result);r.onerror=()=>no(r.error);r.onblocked=()=>no(new Error("กรุณาปิดแท็บ Packing/Dashboard อื่นแล้วลองใหม่"))})}
 async function all(){let d=await db();return new Promise((ok,no)=>{let r=d.transaction(STORE).objectStore(STORE).getAll();r.onsuccess=()=>ok(r.result||[]);r.onerror=()=>no(r.error)})}
 async function get(s,k){let d=await db();return new Promise((ok,no)=>{let r=d.transaction(s).objectStore(s).get(k);r.onsuccess=()=>ok(r.result);r.onerror=()=>no(r.error)})}
 async function put(s,v){let d=await db();return new Promise((ok,no)=>{let r=d.transaction(s,"readwrite").objectStore(s).put(v);r.onsuccess=()=>ok();r.onerror=()=>no(r.error)})}

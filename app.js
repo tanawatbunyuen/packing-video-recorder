@@ -20,7 +20,22 @@ $("quality").onchange=async()=>{if(recorder&&recorder.state==="recording"){toast
 async function start(code){if(!packer)return toast("กรุณาระบุชื่อพนักงานก่อน");if(!root)return toast("กรุณาเลือกโฟลเดอร์ก่อน");if(!await permission())return toast("ไม่ได้รับสิทธิ์โฟลเดอร์");if(!stream){let opened=await openCamera();if(!opened)return}let prior=(await all()).find(x=>x.barcode.toLowerCase()===code.toLowerCase());if(prior)return toast("Order นี้เคยบันทึกแล้ว หากต้องการอัดใหม่ให้ลบวิดีโอเดิมก่อน");active=code;chunks=[];let mime=MediaRecorder.isTypeSupported("video/webm;codecs=vp9")?"video/webm;codecs=vp9":"video/webm";let q=selectedQuality();recorder=new MediaRecorder(stream,{mimeType:mime,videoBitsPerSecond:q.b});$("quality").disabled=true;recorder.ondataavailable=e=>{if(e.data.size)chunks.push(e.data)};recorder.start(1000);started=Date.now();$("order").textContent=code;$("rec").hidden=false;$("stopBtn").disabled=false;$("state").textContent="RECORDING";timer=setInterval(()=>$("timer").textContent=fmt((Date.now()-started)/1000),500)}
 async function stop(){if(!recorder||recorder.state!=="recording")return;let code=active,worker=packer,dur=(Date.now()-started)/1000;await new Promise(ok=>{recorder.onstop=ok;recorder.stop()});clearInterval(timer);$("state").textContent="SAVING";let d=new Date(),z=n=>String(n).padStart(2,"0"),day=`${d.getFullYear()}-${z(d.getMonth()+1)}-${z(d.getDate())}`,tm=`${z(d.getHours())}${z(d.getMinutes())}${z(d.getSeconds())}`,filename=`${safe(code)}_${safe(worker)}_${tm}.webm`;try{let dir=await root.getDirectoryHandle(day,{create:true}),fh=await dir.getFileHandle(filename,{create:true}),w=await fh.createWritable();await w.write(new Blob(chunks,{type:recorder.mimeType}));await w.close();await put(STORE,{barcode:code,worker,folder:day,filename,createdAt:d.toISOString(),durationSeconds:dur},true);toast("บันทึก "+code+" แล้ว")}catch(e){toast("บันทึกไม่สำเร็จ: "+e.message)}recorder=null;active="";chunks=[];$("quality").disabled=false;$("rec").hidden=true;$("stopBtn").disabled=true;$("order").textContent="-";$("state").textContent="IDLE";await render();$("barcode").focus()}
 $("stopBtn").onclick=stop;
-$("barcode").addEventListener("keydown",async e=>{if(e.key!=="Enter")return;let code=e.target.value.trim();e.target.value="";if(!code)return;if(recorder&&recorder.state==="recording"){if(code.toLowerCase()===active.toLowerCase())await stop();else toast("กำลังอัด "+active+" ต้องยิง Barcode เดิมเพื่อหยุด");return}await start(code)});
+let scanBusy=false;
+async function submitBarcode(){
+  if(scanBusy)return;
+  const field=$("barcode"),code=field.value.trim();
+  if(!code){toast("กรุณากรอก Barcode");field.focus();return}
+  scanBusy=true;field.value="";$("scanBtn").disabled=true;
+  try{
+    if(recorder&&recorder.state==="recording"){
+      if(code.toLowerCase()===active.toLowerCase())await stop();
+      else toast("กำลังอัด "+active+" ต้องยิง Barcode เดิมเพื่อหยุด");
+    }else await start(code);
+  }catch(e){console.error("Barcode recording error:",e);toast("เริ่มบันทึกไม่ได้: "+(e.message||e.name||e))}
+  finally{scanBusy=false;$("scanBtn").disabled=false;field.focus()}
+}
+$("barcode").addEventListener("keydown",e=>{if(e.key==="Enter"||e.key==="NumpadEnter"){e.preventDefault();submitBarcode()}});
+$("scanBtn").onclick=submitBarcode;
 async function play(x){try{if(!root||!await permission())return toast("กรุณาเลือกโฟลเดอร์วิดีโอ");let dir=await root.getDirectoryHandle(x.folder),fh=await dir.getFileHandle(x.filename),f=await fh.getFile(),u=URL.createObjectURL(f);window.open(u,"_blank");setTimeout(()=>URL.revokeObjectURL(u),60000)}catch(e){toast("เปิดวิดีโอไม่ได้")}}
 async function removeRecording(x){if(recorder&&recorder.state==="recording")return toast("ไม่สามารถลบขณะกำลังอัด");if(!root||!await permission())return toast("กรุณาเลือกโฟลเดอร์วิดีโอ");let m=document.createElement("div");m.className="modal";m.innerHTML=`<div><h3>ลบวิดีโอ?</h3><p>จะลบ Order <b></b> ทั้งไฟล์วิดีโอและ Packing Log หลังจากนั้นสามารถสแกน Barcode นี้เพื่ออัดใหม่ได้</p><div class="buttons"><button id="cancel">ยกเลิก</button><button class="red" id="yes">ลบวิดีโอ</button></div></div>`;m.querySelector("b").textContent=x.barcode;document.body.appendChild(m);m.querySelector("#cancel").onclick=()=>m.remove();m.querySelector("#yes").onclick=async()=>{m.remove();try{let dir=await root.getDirectoryHandle(x.folder);try{await dir.removeEntry(x.filename)}catch(e){if(e.name!=="NotFoundError")throw e}await del(x.id);toast("ลบแล้ว สามารถสแกน "+x.barcode+" เพื่ออัดใหม่ได้");await render()}catch(e){toast("ลบไม่สำเร็จ: "+e.message)}}}
 

@@ -1,4 +1,4 @@
-const $=id=>document.getElementById(id);let stream,recorder,chunks=[],active="",packer="",started=0,timer,root;
+const $=id=>document.getElementById(id);let stream,recorder,chunks=[],active="",packer="",started=0,timer,root,recordingError="",stopping=false;
 const DB="pack-v14",STORE="logs",HANDLES="handles",PREFS="prefs";
 function toast(s){$("toast").textContent=s;$("toast").classList.add("show");setTimeout(()=>$("toast").classList.remove("show"),2500)}
 function fmt(s){s=Math.floor(s);return String(Math.floor(s/60)).padStart(2,"0")+":"+String(s%60).padStart(2,"0")}
@@ -28,16 +28,65 @@ $("folderBtn").onclick=async()=>{
 }
 const QUALITY={480:{w:854,h:480,b:800000},720:{w:1280,h:720,b:1500000},1080:{w:1920,h:1080,b:3000000}};
 function selectedQuality(){return QUALITY[$("quality").value]||QUALITY[720]}
-async function openCamera(){try{let q=selectedQuality();stream=await navigator.mediaDevices.getUserMedia({video:{width:{ideal:q.w},height:{ideal:q.h},frameRate:{ideal:30}},audio:false});$("preview").srcObject=stream;$("cameraStatus").textContent="CAMERA ON • "+$("quality").value+"p";$("cameraBtn").textContent="ปิดกล้อง";$("quality").disabled=false;$("barcode").focus();return true}catch(e){stream=null;toast("เปิดกล้องไม่ได้: "+e.message);return false}}
+function cameraLive(){return !!stream&&stream.getVideoTracks().some(t=>t.readyState==="live"&&!t.muted)}
+async function openCamera(){try{if(stream)stream.getTracks().forEach(t=>t.stop());let q=selectedQuality();stream=await navigator.mediaDevices.getUserMedia({video:{width:{ideal:q.w},height:{ideal:q.h},frameRate:{ideal:30}},audio:false});$("preview").srcObject=stream;stream.getVideoTracks().forEach(t=>{t.onended=()=>{$("cameraStatus").textContent="CAMERA DISCONNECTED";toast("กล้องถูกตัดการเชื่อมต่อ กรุณาตรวจสอบกล้อง")};t.onmute=()=>{$("cameraStatus").textContent="CAMERA NO SIGNAL";toast("กล้องหยุดส่งภาพ กรุณาตรวจสอบกล้อง")}});await $("preview").play().catch(()=>{});$("cameraStatus").textContent="CAMERA ON • "+$("quality").value+"p";$("cameraBtn").textContent="ปิดกล้อง";$("quality").disabled=false;$("barcode").focus();return true}catch(e){stream=null;toast("เปิดกล้องไม่ได้: "+e.message);return false}}
 function closeCamera(){if(recorder&&recorder.state==="recording"){toast("ปิดกล้องไม่ได้ขณะกำลังบันทึก");return false}if(stream){stream.getTracks().forEach(t=>t.stop());stream=null}$("preview").srcObject=null;$("cameraStatus").textContent="CAMERA OFF";$("cameraBtn").textContent="เปิดกล้อง";$("barcode").focus();return true}
 $("cameraBtn").onclick=async()=>{if(stream)closeCamera();else await openCamera()}
 $("quality").onchange=async()=>{if(recorder&&recorder.state==="recording"){toast("เปลี่ยนคุณภาพไม่ได้ขณะกำลังบันทึก");return}await put(PREFS,{key:"quality",value:$("quality").value});if(stream){closeCamera();await openCamera()}else{$("cameraStatus").textContent="CAMERA OFF • "+$("quality").value+"p"}}
-async function start(code){if(!packer)return toast("กรุณาระบุชื่อพนักงานก่อน");if(!root)return toast("กรุณาเลือกโฟลเดอร์ก่อน");if(!await permission())return toast("ไม่ได้รับสิทธิ์โฟลเดอร์");if(!stream){let opened=await openCamera();if(!opened)return}let prior=(await all()).find(x=>x.barcode.toLowerCase()===code.toLowerCase());if(prior)return toast("Order นี้เคยบันทึกแล้ว หากต้องการอัดใหม่ให้ลบวิดีโอเดิมก่อน");active=code;chunks=[];let mime=MediaRecorder.isTypeSupported("video/webm;codecs=vp9")?"video/webm;codecs=vp9":"video/webm";let q=selectedQuality();recorder=new MediaRecorder(stream,{mimeType:mime,videoBitsPerSecond:q.b});$("quality").disabled=true;recorder.ondataavailable=e=>{if(e.data.size)chunks.push(e.data)};recorder.start(1000);started=Date.now();$("order").textContent=code;$("rec").hidden=false;$("stopBtn").disabled=false;$("state").textContent="RECORDING";timer=setInterval(()=>$("timer").textContent=fmt((Date.now()-started)/1000),500)}
-async function stop(){if(!recorder||recorder.state!=="recording")return;let code=active,worker=packer,dur=(Date.now()-started)/1000;await new Promise(ok=>{recorder.onstop=ok;recorder.stop()});clearInterval(timer);$("state").textContent="SAVING";let d=new Date(),z=n=>String(n).padStart(2,"0"),day=`${d.getFullYear()}-${z(d.getMonth()+1)}-${z(d.getDate())}`,tm=`${z(d.getHours())}${z(d.getMinutes())}${z(d.getSeconds())}`,filename=`${safe(code)}_${safe(worker)}_${tm}.webm`;try{let dir=await root.getDirectoryHandle(day,{create:true}),fh=await dir.getFileHandle(filename,{create:true}),w=await fh.createWritable();await w.write(new Blob(chunks,{type:recorder.mimeType}));await w.close();await put(STORE,{barcode:code,worker,folder:day,filename,createdAt:d.toISOString(),durationSeconds:dur},true);toast("บันทึก "+code+" แล้ว")}catch(e){toast("บันทึกไม่สำเร็จ: "+e.message)}recorder=null;active="";chunks=[];$("quality").disabled=false;$("rec").hidden=true;$("stopBtn").disabled=true;$("order").textContent="-";$("state").textContent="IDLE";await render();$("barcode").focus()}
+async function start(code){
+ if(!packer)return toast("กรุณาระบุชื่อพนักงานก่อน");
+ if(!root)return toast("กรุณาเลือกโฟลเดอร์ก่อน");
+ if(!await permission())return toast("ไม่ได้รับสิทธิ์โฟลเดอร์");
+ if(!cameraLive()){const opened=await openCamera();if(!opened||!cameraLive())return toast("กล้องไม่พร้อม กรุณาตรวจสอบภาพ Preview")}
+ const prior=(await all()).find(x=>x.barcode.toLowerCase()===code.toLowerCase());
+ if(prior)return toast("Order นี้เคยบันทึกแล้ว หากต้องการอัดใหม่ให้ลบวิดีโอเดิมก่อน");
+ if(typeof MediaRecorder==="undefined")return toast("Browser ไม่รองรับ MediaRecorder");
+ const mime=["video/webm;codecs=vp8","video/webm"].find(x=>MediaRecorder.isTypeSupported(x));
+ if(!mime)return toast("Browser ไม่รองรับการบันทึก WebM");
+ const q=selectedQuality();chunks=[];recordingError="";
+ const next=new MediaRecorder(stream,{mimeType:mime,videoBitsPerSecond:q.b});
+ next.ondataavailable=e=>{if(e.data&&e.data.size>0)chunks.push(e.data)};
+ next.onerror=e=>{recordingError=e.error?.message||"MediaRecorder error";console.error("Recorder error",e);toast("บันทึกวิดีโอมีปัญหา: "+recordingError)};
+ next.start(1000);recorder=next;active=code;started=Date.now();
+ $("quality").disabled=true;$("order").textContent=code;$("rec").hidden=false;$("stopBtn").disabled=false;$("state").textContent="RECORDING";
+ clearInterval(timer);timer=setInterval(()=>{if(recorder?.state==="recording"&&!cameraLive()){$("cameraStatus").textContent="CAMERA NO SIGNAL";$("state").textContent="CAMERA ERROR";} $("timer").textContent=fmt((Date.now()-started)/1000)},500);
+}
+async function stop(){
+ if(stopping||!recorder)return;
+ stopping=true;const current=recorder,code=active,worker=packer,dur=(Date.now()-started)/1000;
+ $("state").textContent="SAVING";$("stopBtn").disabled=true;
+ try{
+  if(current.state==="recording"){
+   try{current.requestData()}catch(e){console.warn("requestData failed",e)}
+   await Promise.race([
+    new Promise((resolve,reject)=>{current.addEventListener("stop",resolve,{once:true});try{current.stop()}catch(e){reject(e)}}),
+    new Promise((_,reject)=>setTimeout(()=>reject(new Error("Recorder stop timeout (10s)")),10000))
+   ]);
+  }
+  if(recordingError)throw new Error(recordingError);
+  const blob=new Blob(chunks,{type:current.mimeType||"video/webm"});
+  if(blob.size<1024)throw new Error("วิดีโอว่างหรือข้อมูลน้อยผิดปกติ กรุณาตรวจสอบกล้อง");
+  const d=new Date(),z=n=>String(n).padStart(2,"0"),day=`${d.getFullYear()}-${z(d.getMonth()+1)}-${z(d.getDate())}`,tm=`${z(d.getHours())}${z(d.getMinutes())}${z(d.getSeconds())}`;
+  const filename=`${safe(code)}_${safe(worker)}_${tm}.webm`;
+  const dir=await root.getDirectoryHandle(day,{create:true}),fh=await dir.getFileHandle(filename,{create:true}),w=await fh.createWritable();
+  try{await w.write(blob);await w.close()}catch(e){try{await w.abort()}catch(_){}throw e}
+  await put(STORE,{barcode:code,worker,folder:day,filename,createdAt:d.toISOString(),durationSeconds:dur},true);
+  toast("บันทึก "+code+" แล้ว ("+Math.round(blob.size/1024)+" KB)");
+ }catch(e){
+  console.error("Save recording failed",e);$("state").textContent="SAVE ERROR";toast("บันทึกไม่สำเร็จ: "+(e.message||e.name));
+  // Preserve any captured chunks in memory until next recording; do not claim a successful save.
+  if(current.state==="recording")try{current.stop()}catch(_){}
+ }finally{
+  clearInterval(timer);recorder=null;active="";$("quality").disabled=false;$("rec").hidden=true;$("stopBtn").disabled=true;$("order").textContent="-";stopping=false;
+  if($("state").textContent!=="SAVE ERROR")$("state").textContent="IDLE";
+  try{await render()}catch(e){console.error("Log refresh failed",e)}
+  $("barcode").focus();
+ }
+}
 $("stopBtn").onclick=stop;
 let scanBusy=false;
 async function submitBarcode(){
-  if(scanBusy)return;
+  if(scanBusy||stopping)return;
   const field=$("barcode"),code=field.value.trim();
   if(!code){toast("กรุณากรอก Barcode");field.focus();return}
   scanBusy=true;field.value="";$("scanBtn").disabled=true;

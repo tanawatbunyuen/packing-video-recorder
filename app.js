@@ -29,15 +29,44 @@ $("folderBtn").onclick=async()=>{
 const QUALITY={480:{w:854,h:480,b:800000},720:{w:1280,h:720,b:1500000},1080:{w:1920,h:1080,b:3000000}};
 function selectedQuality(){return QUALITY[$("quality").value]||QUALITY[720]}
 function cameraLive(){return !!stream&&stream.getVideoTracks().some(t=>t.readyState==="live"&&!t.muted)}
-async function openCamera(){try{if(stream)stream.getTracks().forEach(t=>t.stop());let q=selectedQuality();stream=await navigator.mediaDevices.getUserMedia({video:{width:{ideal:q.w},height:{ideal:q.h},frameRate:{ideal:30}},audio:false});$("preview").srcObject=stream;stream.getVideoTracks().forEach(t=>{t.onended=()=>{$("cameraStatus").textContent="CAMERA DISCONNECTED";toast("กล้องถูกตัดการเชื่อมต่อ กรุณาตรวจสอบกล้อง")};t.onmute=()=>{$("cameraStatus").textContent="CAMERA NO SIGNAL";toast("กล้องหยุดส่งภาพ กรุณาตรวจสอบกล้อง")}});await $("preview").play().catch(()=>{});$("cameraStatus").textContent="CAMERA ON • "+$("quality").value+"p";$("cameraBtn").textContent="ปิดกล้อง";$("quality").disabled=false;$("barcode").focus();return true}catch(e){stream=null;toast("เปิดกล้องไม่ได้: "+e.message);return false}}
-function closeCamera(){if(recorder&&recorder.state==="recording"){toast("ปิดกล้องไม่ได้ขณะกำลังบันทึก");return false}if(stream){stream.getTracks().forEach(t=>t.stop());stream=null}$("preview").srcObject=null;$("cameraStatus").textContent="CAMERA OFF";$("cameraBtn").textContent="เปิดกล้อง";$("barcode").focus();return true}
-$("cameraBtn").onclick=async()=>{if(stream)closeCamera();else await openCamera()}
-$("quality").onchange=async()=>{if(recorder&&recorder.state==="recording"){toast("เปลี่ยนคุณภาพไม่ได้ขณะกำลังบันทึก");return}await put(PREFS,{key:"quality",value:$("quality").value});if(stream){closeCamera();await openCamera()}else{$("cameraStatus").textContent="CAMERA OFF • "+$("quality").value+"p"}}
+let cameraWanted=false,cameraOpening=false,cameraRecovery=false,lastFrameAt=0,lastFrameTime=-1,lastFrameCheck=0,healthBusy=false;
+function cameraFrameFresh(){
+ const v=$("preview"),now=Date.now();
+ if(v.readyState<2||v.videoWidth===0||v.videoHeight===0)return false;
+ if(v.currentTime>lastFrameTime+0.02){lastFrameTime=v.currentTime;lastFrameAt=now}
+ return now-lastFrameAt<12000;
+}
+async function recoverCamera(reason){
+ if(cameraRecovery||cameraOpening||!cameraWanted||recorder||stopping)return;
+ cameraRecovery=true;$("cameraStatus").textContent="CAMERA RECOVERING";$("state").textContent="RECOVERING";
+ toast("กำลังเชื่อมต่อกล้องใหม่: "+reason);
+ try{
+  const ok=await openCamera();
+  if(ok&&cameraLive()){lastFrameAt=Date.now();lastFrameTime=-1;$("state").textContent="IDLE";toast("เชื่อมต่อกล้องใหม่สำเร็จ")}
+  else{$("state").textContent="CAMERA ERROR";toast("เชื่อมต่อกล้องไม่ได้ กรุณาตรวจสอบ USB/กล้อง")}
+ }finally{cameraRecovery=false}
+}
+setInterval(async()=>{
+ if(healthBusy||!cameraWanted||cameraOpening||cameraRecovery)return;
+ healthBusy=true;
+ try{
+  if(recorder||stopping){
+   if(recorder?.state==="recording"&&(!cameraLive()||!cameraFrameFresh())){
+    $("cameraStatus").textContent="CAMERA NO SIGNAL";$("state").textContent="CAMERA ERROR";
+    // Never restart a camera while recording: preserve recorder and let operator stop/save.
+   }
+  }else if(!cameraLive()||!cameraFrameFresh())await recoverCamera("ไม่มีภาพจากกล้อง");
+ }catch(e){console.error("Camera health check failed",e)}finally{healthBusy=false}
+},5000);
+async function openCamera(){if(cameraOpening)return false;cameraOpening=true;try{if(stream)stream.getTracks().forEach(t=>t.stop());let q=selectedQuality();stream=await navigator.mediaDevices.getUserMedia({video:{width:{ideal:q.w},height:{ideal:q.h},frameRate:{ideal:30}},audio:false});$("preview").srcObject=stream;lastFrameAt=Date.now();lastFrameTime=-1;stream.getVideoTracks().forEach(t=>{t.onended=()=>{$("cameraStatus").textContent="CAMERA DISCONNECTED";toast("กล้องถูกตัดการเชื่อมต่อ กรุณาตรวจสอบกล้อง")};t.onmute=()=>{$("cameraStatus").textContent="CAMERA NO SIGNAL";toast("กล้องหยุดส่งภาพ กรุณาตรวจสอบกล้อง")}});await $("preview").play().catch(()=>{});$("cameraStatus").textContent="CAMERA ON • "+$("quality").value+"p";$("cameraBtn").textContent="ปิดกล้อง";$("quality").disabled=false;$("barcode").focus();return true}catch(e){stream=null;toast("เปิดกล้องไม่ได้: "+e.message);return false}finally{cameraOpening=false}}
+function closeCamera(){cameraWanted=false;if(recorder&&recorder.state==="recording"){toast("ปิดกล้องไม่ได้ขณะกำลังบันทึก");return false}if(stream){stream.getTracks().forEach(t=>t.stop());stream=null}$("preview").srcObject=null;$("cameraStatus").textContent="CAMERA OFF";$("cameraBtn").textContent="เปิดกล้อง";$("barcode").focus();return true}
+$("cameraBtn").onclick=async()=>{if(stream){closeCamera()}else{cameraWanted=true;await openCamera()}}
+$("quality").onchange=async()=>{if(recorder&&recorder.state==="recording"){toast("เปลี่ยนคุณภาพไม่ได้ขณะกำลังบันทึก");return}await put(PREFS,{key:"quality",value:$("quality").value});if(stream){closeCamera();cameraWanted=true;await openCamera()}else{$("cameraStatus").textContent="CAMERA OFF • "+$("quality").value+"p"}}
 async function start(code){
  if(!packer)return toast("กรุณาระบุชื่อพนักงานก่อน");
  if(!root)return toast("กรุณาเลือกโฟลเดอร์ก่อน");
  if(!await permission())return toast("ไม่ได้รับสิทธิ์โฟลเดอร์");
- if(!cameraLive()){const opened=await openCamera();if(!opened||!cameraLive())return toast("กล้องไม่พร้อม กรุณาตรวจสอบภาพ Preview")}
+ if(!cameraLive()){cameraWanted=true;const opened=await openCamera();if(!opened||!cameraLive())return toast("กล้องไม่พร้อม กรุณาตรวจสอบภาพ Preview")}
  const prior=(await all()).find(x=>x.barcode.toLowerCase()===code.toLowerCase());
  if(prior)return toast("Order นี้เคยบันทึกแล้ว หากต้องการอัดใหม่ให้ลบวิดีโอเดิมก่อน");
  if(typeof MediaRecorder==="undefined")return toast("Browser ไม่รองรับ MediaRecorder");
@@ -78,7 +107,7 @@ async function stop(){
   if(current.state==="recording")try{current.stop()}catch(_){}
  }finally{
   clearInterval(timer);recorder=null;active="";$("quality").disabled=false;$("rec").hidden=true;$("stopBtn").disabled=true;$("order").textContent="-";stopping=false;
-  if($("state").textContent!=="SAVE ERROR")$("state").textContent="IDLE";
+  if($("state").textContent!=="SAVE ERROR")$("state").textContent="IDLE";if(cameraWanted&&!cameraLive())setTimeout(()=>recoverCamera("หลังบันทึกเสร็จ"),500);
   try{await render()}catch(e){console.error("Log refresh failed",e)}
   $("barcode").focus();
  }

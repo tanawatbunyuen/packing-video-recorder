@@ -1,167 +1,31 @@
-const $=id=>document.getElementById(id);let stream,recorder,chunks=[],active="",packer="",started=0,timer,root,recordingError="",stopping=false;
-const DB="pack-v14",STORE="logs",HANDLES="handles",PREFS="prefs";
-function toast(s){$("toast").textContent=s;$("toast").classList.add("show");setTimeout(()=>$("toast").classList.remove("show"),2500)}
-function fmt(s){s=Math.floor(s);return String(Math.floor(s/60)).padStart(2,"0")+":"+String(s%60).padStart(2,"0")}
-function safe(s){return s.replace(/[^A-Za-z0-9ก-๙._-]+/g,"_").slice(0,100)}
-function db(){return new Promise((ok,no)=>{const r=indexedDB.open(DB,2);r.onupgradeneeded=()=>{const d=r.result;if(!d.objectStoreNames.contains("logs"))d.createObjectStore("logs",{keyPath:"id",autoIncrement:true});if(!d.objectStoreNames.contains("handles"))d.createObjectStore("handles",{keyPath:"key"});if(!d.objectStoreNames.contains("prefs"))d.createObjectStore("prefs",{keyPath:"key"})};r.onsuccess=()=>ok(r.result);r.onerror=()=>no(r.error);r.onblocked=()=>no(new Error("กรุณาปิดแท็บ Packing/Dashboard อื่นแล้วลองใหม่"))})}
-async function put(s,v,add=false){let d=await db();return new Promise((ok,no)=>{let t=d.transaction(s,"readwrite"),r=add?t.objectStore(s).add(v):t.objectStore(s).put(v);r.onsuccess=()=>ok(r.result);r.onerror=()=>no(r.error)})}
-async function get(s,k){let d=await db();return new Promise((ok,no)=>{let r=d.transaction(s).objectStore(s).get(k);r.onsuccess=()=>ok(r.result);r.onerror=()=>no(r.error)})}
-async function all(){let d=await db();return new Promise((ok,no)=>{let r=d.transaction(STORE).objectStore(STORE).getAll();r.onsuccess=()=>ok(r.result||[]);r.onerror=()=>no(r.error)})}
-async function del(id){let d=await db();return new Promise((ok,no)=>{let t=d.transaction(STORE,"readwrite");t.objectStore(STORE).delete(id);t.oncomplete=ok;t.onerror=()=>no(t.error)})}
-async function permission(){if(!root)return false;try{let p=await root.queryPermission({mode:"readwrite"});if(p==="granted")return true;return await root.requestPermission({mode:"readwrite"})==="granted"}catch(e){console.error("Folder permission failed:",e);toast("ไม่สามารถเข้าถึงโฟลเดอร์: "+(e.message||e.name));return false}}
-$("workerBtn").onclick=async()=>{let n=$("worker").value.trim();if(!n)return toast("กรุณาพิมพ์ชื่อพนักงาน");packer=n;$("currentWorker").textContent=n;$("workerStatus").textContent="ผู้แพ็ก: "+n;await put(PREFS,{key:"worker",value:n});$("barcode").focus()}
-$("folderBtn").onclick=async()=>{
-  try{
-    if(typeof window.showDirectoryPicker!=="function"){toast("เบราว์เซอร์ไม่รองรับการเลือกโฟลเดอร์ กรุณาใช้ Chrome/Edge ผ่าน HTTPS");return}
-    const selected=await window.showDirectoryPicker({mode:"readwrite"});
-    root=selected;
-    $("folderStatus").textContent="FOLDER: "+selected.name;
-    toast("เลือกโฟลเดอร์ "+selected.name+" สำเร็จ");
-    try{await put(HANDLES,{key:"root",handle:selected})}
-    catch(e){console.error("Folder preference save failed:",e);toast("เลือกโฟลเดอร์สำเร็จ แต่จำค่าไม่ได้: "+(e.message||e.name))}
-    $("barcode").focus();
-  }catch(e){
-    if(e.name==="AbortError")return;
-    console.error("Folder selection failed:",e);
-    toast("เลือกโฟลเดอร์ไม่สำเร็จ: "+(e.message||e.name||e));
-  }
-}
-const QUALITY={480:{w:854,h:480,b:800000},720:{w:1280,h:720,b:1500000},1080:{w:1920,h:1080,b:3000000}};
-function selectedQuality(){return QUALITY[$("quality").value]||QUALITY[720]}
-function cameraLive(){return !!stream&&stream.getVideoTracks().some(t=>t.readyState==="live"&&!t.muted)}
-let cameraWanted=false,cameraOpening=false,cameraRecovery=false,lastFrameAt=0,lastFrameTime=-1,lastFrameCheck=0,healthBusy=false;
-function cameraFrameFresh(){
- const v=$("preview"),now=Date.now();
- if(v.readyState<2||v.videoWidth===0||v.videoHeight===0)return false;
- if(v.currentTime>lastFrameTime+0.02){lastFrameTime=v.currentTime;lastFrameAt=now}
- return now-lastFrameAt<12000;
-}
-async function recoverCamera(reason){
- if(cameraRecovery||cameraOpening||!cameraWanted||recorder||stopping)return;
- cameraRecovery=true;$("cameraStatus").textContent="CAMERA RECOVERING";$("state").textContent="RECOVERING";
- toast("กำลังเชื่อมต่อกล้องใหม่: "+reason);
- try{
-  const ok=await openCamera();
-  if(ok&&cameraLive()){lastFrameAt=Date.now();lastFrameTime=-1;$("state").textContent="IDLE";toast("เชื่อมต่อกล้องใหม่สำเร็จ")}
-  else{$("state").textContent="CAMERA ERROR";toast("เชื่อมต่อกล้องไม่ได้ กรุณาตรวจสอบ USB/กล้อง")}
- }finally{cameraRecovery=false}
-}
-setInterval(async()=>{
- if(healthBusy||!cameraWanted||cameraOpening||cameraRecovery)return;
- healthBusy=true;
- try{
-  if(recorder||stopping){
-   if(recorder?.state==="recording"&&(!cameraLive()||!cameraFrameFresh())){
-    $("cameraStatus").textContent="CAMERA NO SIGNAL";$("state").textContent="CAMERA ERROR";
-    // Never restart a camera while recording: preserve recorder and let operator stop/save.
-   }
-  }else if(!cameraLive()||!cameraFrameFresh())await recoverCamera("ไม่มีภาพจากกล้อง");
- }catch(e){console.error("Camera health check failed",e)}finally{healthBusy=false}
-},5000);
-async function openCamera(){if(cameraOpening)return false;cameraOpening=true;try{if(stream)stream.getTracks().forEach(t=>t.stop());let q=selectedQuality();stream=await navigator.mediaDevices.getUserMedia({video:{width:{ideal:q.w},height:{ideal:q.h},frameRate:{ideal:30}},audio:false});$("preview").srcObject=stream;lastFrameAt=Date.now();lastFrameTime=-1;stream.getVideoTracks().forEach(t=>{t.onended=()=>{$("cameraStatus").textContent="CAMERA DISCONNECTED";toast("กล้องถูกตัดการเชื่อมต่อ กรุณาตรวจสอบกล้อง")};t.onmute=()=>{$("cameraStatus").textContent="CAMERA NO SIGNAL";toast("กล้องหยุดส่งภาพ กรุณาตรวจสอบกล้อง")}});await $("preview").play().catch(()=>{});$("cameraStatus").textContent="CAMERA ON • "+$("quality").value+"p";$("cameraBtn").textContent="ปิดกล้อง";$("quality").disabled=false;$("barcode").focus();return true}catch(e){stream=null;toast("เปิดกล้องไม่ได้: "+e.message);return false}finally{cameraOpening=false}}
-function closeCamera(){cameraWanted=false;if(recorder&&recorder.state==="recording"){toast("ปิดกล้องไม่ได้ขณะกำลังบันทึก");return false}if(stream){stream.getTracks().forEach(t=>t.stop());stream=null}$("preview").srcObject=null;$("cameraStatus").textContent="CAMERA OFF";$("cameraBtn").textContent="เปิดกล้อง";$("barcode").focus();return true}
-$("cameraBtn").onclick=async()=>{if(stream){closeCamera()}else{cameraWanted=true;await openCamera()}}
-$("quality").onchange=async()=>{if(recorder&&recorder.state==="recording"){toast("เปลี่ยนคุณภาพไม่ได้ขณะกำลังบันทึก");return}await put(PREFS,{key:"quality",value:$("quality").value});if(stream){closeCamera();cameraWanted=true;await openCamera()}else{$("cameraStatus").textContent="CAMERA OFF • "+$("quality").value+"p"}}
-async function start(code){
- if(!packer)return toast("กรุณาระบุชื่อพนักงานก่อน");
- if(!root)return toast("กรุณาเลือกโฟลเดอร์ก่อน");
- if(!await permission())return toast("ไม่ได้รับสิทธิ์โฟลเดอร์");
- if(!cameraLive()){cameraWanted=true;const opened=await openCamera();if(!opened||!cameraLive())return toast("กล้องไม่พร้อม กรุณาตรวจสอบภาพ Preview")}
- const prior=(await all()).find(x=>x.barcode.toLowerCase()===code.toLowerCase());
- if(prior)return toast("Order นี้เคยบันทึกแล้ว หากต้องการอัดใหม่ให้ลบวิดีโอเดิมก่อน");
- if(typeof MediaRecorder==="undefined")return toast("Browser ไม่รองรับ MediaRecorder");
- const mime=["video/webm;codecs=vp8","video/webm"].find(x=>MediaRecorder.isTypeSupported(x));
- if(!mime)return toast("Browser ไม่รองรับการบันทึก WebM");
- const q=selectedQuality();chunks=[];recordingError="";
- const next=new MediaRecorder(stream,{mimeType:mime,videoBitsPerSecond:q.b});
- next.ondataavailable=e=>{if(e.data&&e.data.size>0)chunks.push(e.data)};
- next.onerror=e=>{recordingError=e.error?.message||"MediaRecorder error";console.error("Recorder error",e);toast("บันทึกวิดีโอมีปัญหา: "+recordingError)};
- next.start(1000);recorder=next;active=code;started=Date.now();
- $("quality").disabled=true;$("order").textContent=code;$("rec").hidden=false;$("stopBtn").disabled=false;$("state").textContent="RECORDING";
- clearInterval(timer);timer=setInterval(()=>{if(recorder?.state==="recording"&&!cameraLive()){$("cameraStatus").textContent="CAMERA NO SIGNAL";$("state").textContent="CAMERA ERROR";} $("timer").textContent=fmt((Date.now()-started)/1000)},500);
-}
-async function stop(){
- if(stopping||!recorder)return;
- stopping=true;const current=recorder,code=active,worker=packer,dur=(Date.now()-started)/1000;
- $("state").textContent="SAVING";$("stopBtn").disabled=true;
- try{
-  if(current.state==="recording"){
-   try{current.requestData()}catch(e){console.warn("requestData failed",e)}
-   await Promise.race([
-    new Promise((resolve,reject)=>{current.addEventListener("stop",resolve,{once:true});try{current.stop()}catch(e){reject(e)}}),
-    new Promise((_,reject)=>setTimeout(()=>reject(new Error("Recorder stop timeout (10s)")),10000))
-   ]);
-  }
-  if(recordingError)throw new Error(recordingError);
-  const blob=new Blob(chunks,{type:current.mimeType||"video/webm"});
-  if(blob.size<1024)throw new Error("วิดีโอว่างหรือข้อมูลน้อยผิดปกติ กรุณาตรวจสอบกล้อง");
-  const d=new Date(),z=n=>String(n).padStart(2,"0"),day=`${d.getFullYear()}-${z(d.getMonth()+1)}-${z(d.getDate())}`,tm=`${z(d.getHours())}${z(d.getMinutes())}${z(d.getSeconds())}`;
-  const filename=`${safe(code)}_${safe(worker)}_${tm}.webm`;
-  const dir=await root.getDirectoryHandle(day,{create:true}),fh=await dir.getFileHandle(filename,{create:true}),w=await fh.createWritable();
-  try{await w.write(blob);await w.close()}catch(e){try{await w.abort()}catch(_){}throw e}
-  await put(STORE,{barcode:code,worker,folder:day,filename,createdAt:d.toISOString(),durationSeconds:dur},true);
-  toast("บันทึก "+code+" แล้ว ("+Math.round(blob.size/1024)+" KB)");
- }catch(e){
-  console.error("Save recording failed",e);$("state").textContent="SAVE ERROR";toast("บันทึกไม่สำเร็จ: "+(e.message||e.name));
-  // Preserve any captured chunks in memory until next recording; do not claim a successful save.
-  if(current.state==="recording")try{current.stop()}catch(_){}
- }finally{
-  clearInterval(timer);recorder=null;active="";$("quality").disabled=false;$("rec").hidden=true;$("stopBtn").disabled=true;$("order").textContent="-";stopping=false;
-  if($("state").textContent!=="SAVE ERROR")$("state").textContent="IDLE";if(cameraWanted&&!cameraLive())setTimeout(()=>recoverCamera("หลังบันทึกเสร็จ"),500);
-  try{await render()}catch(e){console.error("Log refresh failed",e)}
-  $("barcode").focus();
- }
-}
-$("stopBtn").onclick=stop;
-let scanBusy=false;
-async function submitBarcode(){
-  if(scanBusy||stopping)return;
-  const field=$("barcode"),code=field.value.trim();
-  if(!code){toast("กรุณากรอก Barcode");field.focus();return}
-  scanBusy=true;field.value="";$("scanBtn").disabled=true;
-  try{
-    if(recorder&&recorder.state==="recording"){
-      if(code.toLowerCase()===active.toLowerCase())await stop();
-      else toast("กำลังอัด "+active+" ต้องยิง Barcode เดิมเพื่อหยุด");
-    }else await start(code);
-  }catch(e){console.error("Barcode recording error:",e);toast("เริ่มบันทึกไม่ได้: "+(e.message||e.name||e))}
-  finally{scanBusy=false;$("scanBtn").disabled=false;field.focus()}
-}
-$("barcode").addEventListener("keydown",e=>{if(e.key==="Enter"||e.key==="NumpadEnter"){e.preventDefault();submitBarcode()}});
-$("scanBtn").onclick=submitBarcode;
-async function play(x){try{if(!root||!await permission())return toast("กรุณาเลือกโฟลเดอร์วิดีโอ");let dir=await root.getDirectoryHandle(x.folder),fh=await dir.getFileHandle(x.filename),f=await fh.getFile(),u=URL.createObjectURL(f);window.open(u,"_blank");setTimeout(()=>URL.revokeObjectURL(u),60000)}catch(e){toast("เปิดวิดีโอไม่ได้")}}
-async function removeRecording(x){if(recorder&&recorder.state==="recording")return toast("ไม่สามารถลบขณะกำลังอัด");if(!root||!await permission())return toast("กรุณาเลือกโฟลเดอร์วิดีโอ");let m=document.createElement("div");m.className="modal";m.innerHTML=`<div><h3>ลบวิดีโอ?</h3><p>จะลบ Order <b></b> ทั้งไฟล์วิดีโอและ Packing Log หลังจากนั้นสามารถสแกน Barcode นี้เพื่ออัดใหม่ได้</p><div class="buttons"><button id="cancel">ยกเลิก</button><button class="red" id="yes">ลบวิดีโอ</button></div></div>`;m.querySelector("b").textContent=x.barcode;document.body.appendChild(m);m.querySelector("#cancel").onclick=()=>m.remove();m.querySelector("#yes").onclick=async()=>{m.remove();try{let dir=await root.getDirectoryHandle(x.folder);try{await dir.removeEntry(x.filename)}catch(e){if(e.name!=="NotFoundError")throw e}await del(x.id);toast("ลบแล้ว สามารถสแกน "+x.barcode+" เพื่ออัดใหม่ได้");await render()}catch(e){toast("ลบไม่สำเร็จ: "+e.message)}}}
+'use strict';
+const $=id=>document.getElementById(id);
+const plans=[['Free',0,20,1],['Starter',199,50,1],['Basic',299,300,1],['Growth',599,1500,3],['Business',1290,5000,5],['Pro',1990,15000,10],['Enterprise',3990,30000,20]];
+const KEY='packtook-demo-v1';
+function read(){try{return JSON.parse(localStorage.getItem(KEY))||{plan:'Free',logs:[]}}catch{return {plan:'Free',logs:[]}}}
+let store=read(), stream=null,recorder=null,parts=[],folder=null,activeBarcode='',startMs=0,ticker=null,ending=false, reservation=false;
+function persist(){localStorage.setItem(KEY,JSON.stringify(store))}
+function toast(message){$('toast').textContent=message;$('toast').classList.add('show');clearTimeout(window._toastTimer);window._toastTimer=setTimeout(()=>$('toast').classList.remove('show'),3800)}
+function monthKey(date=new Date()){return `${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,'0')}`}
+function used(){return store.logs.filter(v=>v.month===monthKey()).length}
+function plan(){return plans.find(p=>p[0]===store.plan)||plans[0]}
+function updateQuota(){const p=plan(),u=used();$('planName').textContent=p[0].toUpperCase();$('usedCount').textContent=u.toLocaleString();$('remainingCount').textContent=Math.max(0,p[2]-u).toLocaleString();$('limitLabel').textContent=`จาก ${p[2].toLocaleString()} วิดีโอ`;$('quotaText').textContent=`${u.toLocaleString()} / ${p[2].toLocaleString()}`;$('quotaProgress').style.width=`${Math.min(100,u/p[2]*100)}%`}
+function showTab(tab){document.querySelectorAll('.tabcontent').forEach(e=>e.hidden=e.id!==tab);document.querySelectorAll('.nav').forEach(e=>e.classList.toggle('active',e.dataset.tab===tab));$('crumb').textContent=tab.toUpperCase();$('pageTitle').textContent={packing:'บันทึกวิดีโอการแพ็กสินค้า',dashboard:'ค้นหาประวัติวิดีโอ',plans:'แพ็กเกจและโควตาวิดีโอ',help:'คู่มือการใช้งาน'}[tab];if(tab==='dashboard')renderHistory();if(tab==='plans')renderPlans()}
+function renderPlans(){ $('planGrid').innerHTML=plans.map(p=>`<article class="plan ${store.plan===p[0]?'selected':''}"><h4>${p[0]}</h4><div class="price">฿${p[1].toLocaleString()}<small style="font-size:12px;font-weight:400">/เดือน</small></div><p>${p[2].toLocaleString()} วิดีโอ / เดือน</p><p>${p[3]} เครื่อง</p><button class="${store.plan===p[0]?'secondary':'primary'}" data-plan="${p[0]}">${store.plan===p[0]?'แพ็กเกจปัจจุบัน':'ทดลองแพ็กเกจนี้'}</button></article>`).join('');document.querySelectorAll('[data-plan]').forEach(b=>b.onclick=()=>{if(recorder&&recorder.state!=='inactive')return toast('หยุดการบันทึกก่อนเปลี่ยนแพ็กเกจ');store.plan=b.dataset.plan;persist();updateQuota();renderPlans();toast(`เปลี่ยนแพ็กเกจ Demo เป็น ${store.plan} (ไม่มีการชำระเงินจริง)`)})}
+function renderHistory(){const date=$('dateFilter').value;const barcode=($('barcodeFilter').value||'').trim().toLowerCase();$('allVideos').textContent=store.logs.length.toLocaleString();$('monthVideos').textContent=used().toLocaleString();const rows=store.logs.filter(x=>(!date||x.day===date)&&(!barcode||x.barcode.toLowerCase().includes(barcode))).sort((a,b)=>b.timestamp-a.timestamp);$('historyRows').replaceChildren();if(!rows.length){const tr=document.createElement('tr');const td=document.createElement('td');td.colSpan=5;td.textContent='ยังไม่มีวิดีโอที่บันทึกสำเร็จ';tr.append(td);$('historyRows').append(tr);return}rows.forEach(r=>{const tr=document.createElement('tr');[new Date(r.timestamp).toLocaleString('th-TH'),r.barcode,r.worker,`${r.seconds} วินาที`].forEach(t=>{const td=document.createElement('td');td.textContent=t;tr.append(td)});const td=document.createElement('td');td.textContent=r.filename+' (ในเครื่อง)';tr.append(td);$('historyRows').append(tr)})}
+function safeFilename(s){return (s||'order').replace(/[^\w\-ก-๙]/g,'_').slice(0,70)}
+function fmtSec(s){return String(Math.floor(s/60)).padStart(2,'0')+':'+String(s%60).padStart(2,'0')}
+function cameraState(on){$('noCam').hidden=on;$('cameraBtn').textContent=on?'ปิดกล้อง':'เปิดกล้อง';if(!activeBarcode)$('recBadge').textContent=on?'● CAMERA ON':'● CAMERA OFF'}
+async function toggleCamera(){if(stream){if(activeBarcode)return toast('หยุดการบันทึกก่อนปิดกล้อง');stream.getTracks().forEach(t=>t.stop());stream=null;$('preview').srcObject=null;cameraState(false);return}try{if(!navigator.mediaDevices?.getUserMedia)throw Error('Browser ไม่รองรับการใช้งานกล้อง');stream=await navigator.mediaDevices.getUserMedia({video:{width:{ideal:1280},height:{ideal:720},frameRate:{ideal:24}},audio:false});$('preview').srcObject=stream;cameraState(true);stream.getVideoTracks()[0]?.addEventListener('ended',()=>{cameraState(false);if(activeBarcode)stopRecording()});toast('เปิดกล้องสำเร็จ')}catch(e){toast('เปิดกล้องไม่สำเร็จ: '+e.message)}}
+async function selectFolder(){try{if(!window.showDirectoryPicker)throw Error('ต้องใช้ Chrome หรือ Edge Desktop ที่รองรับ File System Access API');folder=await window.showDirectoryPicker({mode:'readwrite'});const perm=await folder.requestPermission({mode:'readwrite'});if(perm!=='granted')throw Error('ไม่ได้รับอนุญาตเขียนไฟล์');$('folderStatus').textContent='โฟลเดอร์ที่เลือก: '+folder.name;toast('เลือกโฟลเดอร์สำเร็จ')}catch(e){toast('เลือกโฟลเดอร์ไม่สำเร็จ: '+e.message)}}
+async function startRecording(barcode){if(reservation||ending||activeBarcode)return;if(used()>=plan()[2])return toast('โควตาวิดีโอ Demo ครบแล้ว กรุณาเปลี่ยนแพ็กเกจ');if(!stream||!stream.active)return toast('กรุณาเปิดกล้องก่อน');if(!folder)return toast('กรุณาเลือกโฟลเดอร์บันทึกก่อน');if(!window.MediaRecorder)return toast('Browser ไม่รองรับ MediaRecorder');try{const permission=await folder.queryPermission({mode:'readwrite'});if(permission!=='granted')return toast('ต้องเลือกโฟลเดอร์ใหม่เพื่ออนุญาตเขียนไฟล์');const mime=['video/webm;codecs=vp9','video/webm;codecs=vp8','video/webm'].find(t=>MediaRecorder.isTypeSupported(t));if(!mime)throw Error('Browser ไม่รองรับ WebM');parts=[];recorder=new MediaRecorder(stream,{mimeType:mime,videoBitsPerSecond:1800000});activeBarcode=barcode;startMs=Date.now();recorder.ondataavailable=e=>{if(e.data&&e.data.size>0)parts.push(e.data)};recorder.onerror=e=>toast('เกิดข้อผิดพลาดบันทึก: '+(e.error?.message||'ไม่ทราบสาเหตุ'));recorder.start(1000);$('recordState').textContent='กำลังบันทึก '+barcode+' — สแกน Barcode เดิมเพื่อหยุด';$('recordState').classList.add('active');$('recBadge').textContent='● RECORDING';$('recBadge').classList.add('recording');$('stopBtn').disabled=false;$('recTimer').hidden=false;ticker=setInterval(()=>$('recTimer').textContent='REC '+fmtSec(Math.floor((Date.now()-startMs)/1000)),1000);toast('เริ่มบันทึก '+barcode)}catch(e){activeBarcode='';toast('เริ่มบันทึกไม่สำเร็จ: '+e.message)}}
+async function stopRecording(){if(!activeBarcode||!recorder||ending)return;ending=true;const thisRecorder=recorder;try{if(thisRecorder.state==='recording')thisRecorder.requestData();await new Promise((resolve,reject)=>{const timeout=setTimeout(()=>reject(Error('หยุดบันทึกไม่สำเร็จ')),12000);thisRecorder.addEventListener('stop',()=>{clearTimeout(timeout);resolve()},{once:true});thisRecorder.stop()});const blob=new Blob(parts,{type:'video/webm'});if(blob.size<1000)throw Error('ไฟล์วิดีโอว่างเปล่า');const timestamp=Date.now(),seconds=Math.max(1,Math.round((timestamp-startMs)/1000));const filename=`${safeFilename(activeBarcode)}_${new Date(timestamp).toISOString().replace(/[:.]/g,'-')}.webm`;const handle=await folder.getFileHandle(filename,{create:true});const writable=await handle.createWritable();await writable.write(blob);await writable.close();store.logs.push({month:monthKey(),day:new Date(timestamp).toLocaleDateString('en-CA'),timestamp,barcode:activeBarcode,worker:$('worker').value.trim()||'Unknown',seconds,filename});persist();updateQuota();toast('บันทึกวิดีโอสำเร็จ: '+filename)}catch(e){toast('บันทึกไม่สำเร็จ โควตาไม่ถูกหัก: '+e.message)}finally{clearInterval(ticker);activeBarcode='';parts=[];ending=false;$('stopBtn').disabled=true;$('recTimer').hidden=true;$('recordState').classList.remove('active');$('recordState').textContent='พร้อมสแกน Barcode ถัดไป';$('recBadge').classList.remove('recording');$('recBadge').textContent=stream?.active?'● CAMERA ON':'● CAMERA OFF';$('barcode').focus()}}
+$('loginForm').addEventListener('submit',e=>{e.preventDefault();if($('email').value.trim()==='demo@packtook.test'&&$('password').value==='DemoPacktook2026!'){$('loginPage').hidden=true;$('appPage').hidden=false;sessionStorage.setItem('packtook-demo-session','yes');updateQuota();showTab('packing')}else{$('loginError').hidden=false;$('loginError').textContent='ข้อมูลบัญชี Demo ไม่ถูกต้อง'}});
+$('showPassword').onclick=()=>{$('password').type=$('password').type==='password'?'text':'password'};
+$('logout').onclick=()=>{if(activeBarcode)return toast('หยุดบันทึกก่อนออกจากระบบ');sessionStorage.removeItem('packtook-demo-session');$('appPage').hidden=true;$('loginPage').hidden=false;stream?.getTracks().forEach(t=>t.stop());stream=null;cameraState(false)};
+document.querySelectorAll('[data-tab]').forEach(e=>e.onclick=()=>showTab(e.dataset.tab));$('cameraBtn').onclick=toggleCamera;$('folderBtn').onclick=selectFolder;$('stopBtn').onclick=stopRecording;$('focusScan').onclick=()=>$('barcode').focus();$('refreshHistory').onclick=renderHistory;$('dateFilter').onchange=renderHistory;
+$('barcode').addEventListener('keydown',e=>{if(e.key!=='Enter')return;e.preventDefault();const code=$('barcode').value.trim();$('barcode').value='';if(!code)return;if(ending||reservation)return;if(activeBarcode){if(code===activeBarcode)stopRecording();else toast('กำลังอัด '+activeBarcode+' ต้องสแกนรหัสเดิมเพื่อหยุด');return}reservation=true;startRecording(code).finally(()=>reservation=false)});
+if(sessionStorage.getItem('packtook-demo-session')==='yes'){$('loginPage').hidden=true;$('appPage').hidden=false;updateQuota();showTab('packing')}
 
-const OLD_DAYS=10;
-async function oldRecordings(){
-  const rows=await all(),cutoff=Date.now()-OLD_DAYS*24*60*60*1000;
-  return rows.filter(x=>new Date(x.createdAt).getTime()<cutoff);
-}
-async function deleteOldRecordings(rows){
-  if(!root||!await permission())return toast("กรุณาเลือกโฟลเดอร์วิดีโอก่อน");
-  let removed=0,failed=0;
-  for(const x of rows){
-    try{
-      let dir=await root.getDirectoryHandle(x.folder);
-      try{await dir.removeEntry(x.filename)}catch(e){if(e.name!=="NotFoundError")throw e}
-      await del(x.id); removed++;
-    }catch(e){failed++}
-  }
-  await render();
-  toast(failed?("ลบแล้ว "+removed+" รายการ, ลบไม่สำเร็จ "+failed+" รายการ"):("ลบวิดีโอเก่าแล้ว "+removed+" รายการ"));
-}
-async function checkOldVideos(){
-  const rows=await oldRecordings(); if(!rows.length)return;
-  const oldest=Math.max(...rows.map(x=>Math.floor((Date.now()-new Date(x.createdAt).getTime())/86400000)));
-  let m=document.createElement("div");m.className="modal";
-  m.innerHTML=`<div><h3>พบวิดีโอเก่าเกิน 10 วัน</h3><p>พบ <b class="count"></b> รายการ (เก่าสุดประมาณ <b class="age"></b> วัน) ต้องการลบวิดีโอและ Packing Log เหล่านี้หรือไม่?</p><p><small>ระบบจะลบเฉพาะรายการที่มีอายุเกิน 10 วัน และจะถามยืนยันก่อนทุกครั้ง</small></p><div class="buttons"><button id="oldLater">ยังไม่ลบ</button><button class="red" id="oldDelete">ลบวิดีโอเก่า</button></div></div>`;
-  m.querySelector(".count").textContent=rows.length;m.querySelector(".age").textContent=oldest;
-  document.body.appendChild(m);
-  m.querySelector("#oldLater").onclick=()=>m.remove();
-  m.querySelector("#oldDelete").onclick=async()=>{m.remove();await deleteOldRecordings(rows)};
-}
-
-
-async function render(){let rows=await all(),q=$("search").value.trim().toLowerCase();rows.sort((a,b)=>b.createdAt.localeCompare(a.createdAt));if(q)rows=rows.filter(x=>x.barcode.toLowerCase().includes(q)||(x.worker||"").toLowerCase().includes(q));$("logs").innerHTML="";for(let x of rows){let r=document.createElement("div");r.className="logrow";let a=document.createElement("div");a.className="actions",p=document.createElement("button"),d=document.createElement("button");p.textContent="▶ PLAY";p.onclick=()=>play(x);d.textContent="ลบ";d.className="delete";d.onclick=()=>removeRecording(x);a.append(p,d);for(let v of [x.barcode,x.worker,new Date(x.createdAt).toLocaleString(),fmt(x.durationSeconds)]){let el=document.createElement("div");el.textContent=v;r.appendChild(el)}r.appendChild(a);$("logs").appendChild(r)}}
-$("search").oninput=render;
-(async()=>{let w=await get(PREFS,"worker");if(w?.value){$("worker").value=w.value;packer=w.value;$("currentWorker").textContent=packer;$("workerStatus").textContent="ผู้แพ็ก: "+packer}let q=await get(PREFS,"quality");$("quality").value=q?.value||"720";let h=await get(HANDLES,"root");if(h?.handle){root=h.handle;$("folderStatus").textContent="FOLDER: "+root.name}await render();setTimeout(checkOldVideos,700)})();
+$('barcodeFilter').addEventListener('input',renderHistory);
+$('trialBtn').addEventListener('click',()=>{ $('email').value='demo@packtook.test';$('password').value='DemoPacktook2026!';$('loginForm').requestSubmit(); });
